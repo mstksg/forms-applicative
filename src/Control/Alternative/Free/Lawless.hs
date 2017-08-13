@@ -79,7 +79,7 @@ instance Functor f => Applicative (Alt f) where
       Sequence fs ->
         let fs' = dimap ((),) (uncurry ($)) $ first' fs
         in  \case Sequence xs -> Sequence $ appendAC fs' xs
-                  Choice xs   -> Sequence $ fs' ~>: (const <$> Choice xs)
+                  x           -> Sequence $ fs' ~>: (const <$> x)
       f -> \case
         Sequence (ACNil x) -> ($ x ()) <$> f
         Sequence xs -> Sequence $ f :<~ xs
@@ -97,17 +97,6 @@ instance Functor f => Alternative (Alt f) where
         Choice ys -> Choice (x : ys)
         y -> Choice [x, y]
 
-    -- (<|>) = \case
-    --   ETF (ETChoice []) -> \case
-    --     ETF y -> ETF y
-    --   ETF (ETChoice xs) -> \case
-    --     ETF (ETChoice ys) -> ETF (ETChoice (xs ++ ys))
-    --     ETF y -> ETF (ETChoice (xs ++ [y]))
-    --   ETF x -> \case
-    --     ETF (ETChoice []) -> ETF x
-    --     ETF (ETChoice ys) -> ETF (ETChoice (x : ys))
-    --     ETF y -> ETF (ETChoice [x,y])
-
 liftAlt :: f a -> Alt f a
 liftAlt = Lift
 
@@ -117,6 +106,25 @@ runAlt r = \case
     Sequence (ACNil x)  -> pure (x ())
     Sequence (x :<~ xs) -> runAlt r x <*> runAlt r (Sequence xs)
     Choice xs -> asum $ map (runAlt r) xs
+
+-- check dem laws
+--   
+--
+-- pure f <*> x = fmap f x
+-- = Sequence (ACNil (const f)) <*> x
+-- = fmap (const f ()) x
+-- = fmap f x
+--
+-- nice
+--
+-- f <*> pure x = fmap ($ x) f
+-- = f <*> Sequence (ACNil (const x))
+-- ...
+-- = fmap ($ x) f
+--
+-- Will probably be ok when Lift is incorporated.  but actually Lift isn't
+-- a part of any applicative laws so maybe i's all ok after all.
+--
 
 -- data Alt :: (Type -> Type) -> Type -> Type where
 --     Pure  :: a -> Alt f a
