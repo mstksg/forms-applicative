@@ -16,7 +16,7 @@ cabal-version:       >=1.10
 library
   hs-source-dirs:      src
   exposed-modules:     Form
-                       Control.Alternative.Free.Catch
+                       Control.Alternative.Free.Lawless
   build-depends:       base >= 4.7 && < 5
                      , text
                      , vector-sized

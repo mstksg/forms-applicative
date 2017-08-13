@@ -5,7 +5,7 @@
 {-# LANGUAGE RankNTypes     #-}
 {-# LANGUAGE TypeInType     #-}
 
-module Control.Alternative.Free.Catch (
+module Control.Alternative.Free.Lawless (
     Alt
   , liftAlt
   , runAlt
@@ -40,34 +40,7 @@ instance Functor f => Alternative (Alt f) where
     empty = Empty
     (<|>) = Plus
 
--- must make sure that this follows Applicative laws.
-
--- Yes now we must quotient this.  Obviously not ideal.
---
--- Quotient with: Ap (Pure f) xs = fmap f xs
--- 
--- meaning: Ap (Pure f) (Pure x)     = Pure (f x)
---          Ap (Pure f) (Lift x)     = Pure (fmap f x)
---          Ap (Pure f) Empty        = Empty
---          Ap (Pure f) (Ap xs ys)   = Ap ((f .) <$> xs) ys
---          Ap (Pure f) (Plus xs ys) = Plus (f <$> xs) (f <$> ys)
---
--- Quotient with: Ap fs (Pure x) = fmap ($ x) fs
---
--- meaning: Ap (Pure f)     (Pure x) = Pure (f x)
---          Ap (Lift f)     (Pure x) = Lift (($ x) <$> f)
---          Ap Empty        (Pure x) = Empty
---          Ap (Ap fs gs)   (Pure x) = Ap (($ x) <$> fs) gs
---          Ap (Plus xs ys) (Pure x) = Plus (($ x) <$> xs) (($ x) <$> ys)
---
--- (x <**> y) <**> z == x <**> (y <**> z)
---
--- quotient with: Ap (Ap fs xs) ys = Ap fs (Ap xs ys)   -- or something
---
---
--- Actually, i think this should be okay as long as we only allow runAlt:
---
--- So we can't export Alt's constructors, only runAlt.
+-- We can't export Alt's constructors, only runAlt.
 
 runAlt :: Alternative g => (forall x. f x -> g x) -> Alt f a -> g a
 runAlt r = \case
