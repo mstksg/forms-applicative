@@ -16,12 +16,13 @@ module Form where
 --   , Person(..)
 --   ) where
 
+-- import           Control.Alternative.Free
 -- import           Data.Functor.Foldable
-import           Control.Alternative.Free
+import           Control.Alternative.Free.Lawless
 import           Control.Applicative
 import           Control.Applicative.Lift
 import           Control.Monad
-import           Control.Monad.Free        as FM
+import           Control.Monad.Free               as FM
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.State
 import           Data.Bifunctor
@@ -37,17 +38,17 @@ import           Data.Maybe
 import           Data.Singletons
 import           Data.Singletons.TypeLits
 import           Data.Tuple
-import           GHC.Generics              (Generic)
+import           GHC.Generics                     (Generic)
 import           Numeric.Natural
 import           System.Console.Haskeline
 import           System.IO
 import           Text.Printf
 import           Text.Read
-import qualified Data.Aeson                as A
-import qualified Data.List.NonEmpty        as NE
-import qualified Data.Text                 as T
-import qualified Data.Vector.Sized         as SV
-import qualified Data.Yaml                 as Y
+import qualified Data.Aeson                       as A
+import qualified Data.List.NonEmpty               as NE
+import qualified Data.Text                        as T
+import qualified Data.Vector.Sized                as SV
+import qualified Data.Yaml                        as Y
 
 
 dup :: a -> (a, a)
@@ -173,7 +174,7 @@ data Temp = Hot | Cold
 
 data Person = P { pName       :: T.Text
                 , pAge        :: Natural
-                -- , pHeight     :: Maybe Double
+                , pHeight     :: Maybe Double
                 , pFavColor   :: Either Color String
                 , pCoffeeTemp :: Temp
                 }
@@ -183,7 +184,7 @@ personForm :: Form Person
 personForm = P <$> text "Name" ""
                <*> input "Age" Nothing
                -- <*> optional (input "Age" Nothing)
-               -- <*> optional (input "Height" Nothing)
+               <*> optional (input "Height" Nothing)
                -- <*> (Left <$> select "Favorite Color" [Blue, Red, Yellow, Green] Nothing)
                <*> (Left <$> select "Favorite Color" [Blue, Red, Yellow, Green] Nothing
                      <|> Right <$> string "Other color" ""
@@ -196,25 +197,25 @@ data IOForm a = IOF { runIOForm :: InputT IO (Either [String] a) }
 instance Applicative IOForm where
     pure = IOF . pure . Right
     -- short circuiting
-    ioF <*> ioX = IOF $ do
-      f <- runIOForm ioF
-      case f of
-        Left eF  -> return $ Left eF
-        Right f' -> do
-          x <- runIOForm ioX
-          case x of
-            Left eX  -> return $ Left eX
-            Right x' -> return $ Right (f' x')
-    -- validation-style errors seem to duplicate actions for some reason
-    -- that's because it follows every possible branch, nice
     -- ioF <*> ioX = IOF $ do
     --   f <- runIOForm ioF
-    --   x <- runIOForm ioX
-    --   case (f, x) of
-    --     (Left eF , Left eX ) -> return $ Left (eF ++ eX)
-    --     (Left eF , Right _ ) -> return $ Left eF
-    --     (Right _ , Left eX ) -> return $ Left eX
-    --     (Right f', Right x') -> return $ Right (f' x')
+    --   case f of
+    --     Left eF  -> return $ Left eF
+    --     Right f' -> do
+    --       x <- runIOForm ioX
+    --       case x of
+    --         Left eX  -> return $ Left eX
+    --         Right x' -> return $ Right (f' x')
+    -- validation-style errors seem to duplicate actions for some reason
+    -- that's because it follows every possible branch, nice
+    ioF <*> ioX = IOF $ do
+      f <- runIOForm ioF
+      x <- runIOForm ioX
+      case (f, x) of
+        (Left eF , Left eX ) -> return $ Left (eF ++ eX)
+        (Left eF , Right _ ) -> return $ Left eF
+        (Right _ , Left eX ) -> return $ Left eX
+        (Right f', Right x') -> return $ Right (f' x')
 
 instance Alternative IOForm where
     empty = IOF $ pure (Left [])
@@ -273,148 +274,48 @@ data ElemTree = ETLeaf     T.Text
               | ETChoice   [ElemTree]
   deriving (Show, Eq, Generic)
 
-normalizeET :: ElemTree -> ElemTree
-normalizeET = \case
-    ETLeaf x -> ETLeaf x
-    ETSequence [x] -> normalizeET x
-    ETSequence xs -> ETSequence . filter (not . isEmpty) $ normalizeET <$> xs
-    ETChoice [x] -> normalizeET x
-    ETChoice xs -> ETChoice $ recombine <$> undistribute f (filter (not . isEmpty) $ normalizeET <$> xs)
-    -- case undistribute f (filter (not . isEmpty) xs) of
-    --   Just (ys, zs) -> ETSequence $ ETChoice (normalizeET <$> ys) : (normalizeET <$> zs)
-    --   Nothing       -> ETChoice $ normalizeET <$> xs
-  where
-    isEmpty = \case
-      ETSequence [] -> True
-      ETChoice   [] -> True
-      _             -> False
-    f = \case
-      ETSequence (x:xs) -> Just (x, xs)
-      _ -> Nothing
-    recombine (Right xs) = normalizeET xs
-    recombine (Left (ys, zs)) = ETSequence $ ETChoice (normalizeET <$> ys) : (normalizeET <$> zs)
-
-
-firstChoice :: ElemTree -> [T.Text]
-firstChoice = \case
-  ETLeaf x       -> [x]
-  ETSequence xs  -> firstChoice =<< xs
-  ETChoice []    -> []
-  ETChoice (x:_) -> firstChoice x
-
-etString :: ElemTree -> T.Text
-etString = \case
-  ETLeaf x -> x
-  ETSequence [] -> ""
-  ETSequence xs -> T.concat ["(", T.intercalate " and " $ etString <$> xs, ")"]
-  ETChoice [] -> ""
-  ETChoice xs -> T.concat ["(", T.intercalate " or " $ etString <$> xs, ")"]
-
-undistribute :: Eq c => (a -> Maybe (b, c)) -> [a] -> [Either ([b], c) a]
-undistribute f = map recombine . groupBy g . map f'
-    -- case traverse f xs of
-    -- Just yszs -> map recombine $ groupBy ((==) `on` snd) yszs
-  where
-    f' x = case f x of
-      Just y  -> Left y
-      Nothing -> Right x
-    g (Left (_,x)) (Left (_,y)) = x == y
-    g _            _            = False
-    recombine [Right x] = Right x
-    recombine (Left (x,y) : xys) = Left (x : [ x' | Left (x', _) <- xys ], y)
-    recombine _ = undefined
-    -- recombine ((x,y):xys) = (x : map fst xys,y)
-                      -- do
-    -- (y,z):yszs <- traverse f xs
-    -- guard $ all ((== z) . snd) yszs
-    -- return (y : fmap fst yszs, z)
-
 instance A.ToJSON ElemTree
 
 data ElemTreeF a = ETF { getETF :: ElemTree }
   deriving (Functor, Show)
 
-sequenceET :: ElemTree -> ElemTree -> ElemTree
-sequenceET = \case
-    x@(ETLeaf _) -> \case
-      y@(ETLeaf _)    -> ETSequence [x, y]
-      ETSequence ys   -> ETSequence $ x : ys
-      ys@(ETChoice _) -> ETSequence [x, ys]
-    ETSequence xs -> \case
-      y@(ETLeaf _)    -> ETSequence $ xs ++ [y]
-      ETSequence ys   -> ETSequence $ xs ++ ys
-      ys@(ETChoice _) -> ETSequence $ xs ++ [ys]
-    ETChoice xs -> \case
-      y@(ETLeaf _)    -> ETSequence $ xs ++ [y]
-      ETSequence ys   -> ETSequence $ ETChoice xs : ys
-      ys@(ETChoice _) -> ETSequence [ETChoice xs, ys]
-
 instance Applicative ElemTreeF where
     pure _ = ETF $ ETSequence []
-    ETF x <*> ETF y = ETF $ sequenceET x y
+    (<*>) = \case
+      ETF (ETSequence xs) -> \case
+        ETF (ETSequence ys) -> ETF (ETSequence (xs ++ ys))
+        ETF y -> ETF (ETSequence (xs ++ [y]))
+      ETF x -> \case
+        ETF (ETSequence ys) -> ETF (ETSequence (x : ys))
+        ETF y -> ETF (ETSequence [x, y])
 
-choiceET :: ElemTree -> ElemTree -> ElemTree
-choiceET = \case
-    x@(ETLeaf _) -> \case
-      y@(ETLeaf _)      -> ETChoice [x, y]
-      ys@(ETSequence _) -> ETChoice [x, ys]
-      ETChoice ys       -> ETChoice $ x : ys
-    ETSequence xs -> \case
-      y@(ETLeaf _)      -> ETChoice $ xs ++ [y]
-      ys@(ETSequence _) -> ETChoice $ [ETSequence xs, ys]
-      ETChoice ys       -> ETChoice $ ETSequence xs : ys
-    ETChoice xs -> \case
-      y@(ETLeaf _)      -> ETChoice $ xs ++ [y]
-      ys@(ETSequence _) -> ETChoice $ xs ++ [ys]
-      ETChoice ys       -> ETChoice $ xs ++ ys
+-- is this lawful?
+-- pure f <*> pure x
+-- = Sequence [] <*> Sequence []
+-- = Sequence []
+-- pure (f x)
+-- = Sequence []
+--
+-- nice.
+--
+-- pure f <*> ETF (ETLeaf t)
+-- = ETF (ETSequence []) <*> ETF (ETLeaf t)
+-- = ETF (ETSequence [ETLeaf t])
+-- f <$> ETF (ETLeaf t)
+-- = ETF (ETLeaf t)
+--
+-- uh oh.
+--
 
 instance Alternative ElemTreeF where
     empty = ETF $ ETChoice []
-    ETF x <|> ETF y = ETF $ choiceET x y
-
--- shoe :: ElemTree -> String
--- printElemTree = \case
-
--- sequenceET :: ElemTree -> ElemTree -> ElemTree
--- sequenceET t1 t2 = ETSequence ()
-    -- ETLeaf x -> \case
-    --   ETLeaf y -> ETSequence (ETLeaf x NE.:| [ETLeaf y])
-
--- dephantom :: ElemTree a -> ElemTree b
--- dephantom = \case
---     ETLeaf -> ETLeaf
---     ETSequence xs -> ETSequence (fmap dephantom xs)
---     ETChoice xs   -> ETChoice (fmap dephantom xs)
-
--- instance Applicative ElemTree where
---     pure _ = ETPure
---     ETLeaf x <*> ETLeaf y      = ETSequence [ETLeaf x, ETLeaf y]
---     ETLeaf x <*> ETSequence ys = ETSequence $ ETLeaf x : _ ys
-
--- data ElemAlt a = EA { getEA :: Free [] T.Text }
---     deriving Functor
-
--- instance Applicative ElemAlt where
---     pure _ = EA $ liftF []
---     -- EA xs <*> EA ys = EA . liftF $ retract xs ++ retract ys
---     EA xs <*> EA ys = case (xs, ys) of
---       (FM.Pure x  , FM.Pure y  ) -> EA $ liftF [x,y]
---       (FM.Pure x  , FM.Free ys') -> EA $ FM.Free (liftF [x] : ys')
---       (FM.Free xs', FM.Free ys') -> EA $ FM.Free (xs' ++ ys')
---       (FM.Free xs', FM.Pure y  ) -> EA $ FM.Free (xs' ++ [liftF [y]])
-
--- instance Alternative ElemAlt where
---     empty = EA $ liftF []
---     -- EA xs <|> EA ys = EA . liftF $ retract xs ++ retract ys
---     EA xs <|> EA ys = case (xs, ys) of
---       (FM.Pure x  , FM.Pure y  ) -> EA $ FM.Free (fmap FM.Pure [x,y])
---       -- (FM.Pure x  , FM.Free ys') -> EA $ FM.Free (liftF [x] : ys')
---       -- (FM.Free xs', FM.Free ys') -> EA $ FM.Free (xs' ++ ys')
---       -- (FM.Free xs', FM.Pure y  ) -> EA $ FM.Free (xs' ++ [liftF [y]])
-
--- instance Alternative ElemAlt where
---     empty = EA []
---     EA xs <|> EA ys = EA (fmap (T.append "+ ") xs ++ fmap (T.append "- ") ys)
+    (<|>) = \case
+      ETF (ETChoice xs) -> \case
+        ETF (ETChoice ys) -> ETF (ETChoice (xs ++ ys))
+        ETF y -> ETF (ETChoice (xs ++ [y]))
+      ETF x -> \case
+        ETF (ETChoice ys) -> ETF (ETChoice (x : ys))
+        ETF y -> ETF (ETChoice [x,y])
 
 formElems :: Form a -> ElemTree
 formElems = getETF . runAlt (ETF . go)
@@ -422,44 +323,194 @@ formElems = getETF . runAlt (ETF . go)
     go :: FormElem b -> ElemTree
     go (FE _ desc _ _) = ETLeaf desc
 
--- data JSONAlt a = JA { getJA :: A.Value }
---     deriving Functor
 
--- instance Applicative JSONAlt where
---     pure _ = JA A.Null
---     JA x <*> JA y =
+--normalizeET :: ElemTree -> ElemTree
+--normalizeET = \case
+--    ETLeaf x -> ETLeaf x
+--    ETSequence [x] -> normalizeET x
+--    ETSequence xs -> ETSequence . filter (not . isEmpty) $ normalizeET <$> xs
+--    ETChoice [x] -> normalizeET x
+--    ETChoice xs -> ETChoice $ recombine <$> undistribute f (filter (not . isEmpty) $ normalizeET <$> xs)
+--    -- case undistribute f (filter (not . isEmpty) xs) of
+--    --   Just (ys, zs) -> ETSequence $ ETChoice (normalizeET <$> ys) : (normalizeET <$> zs)
+--    --   Nothing       -> ETChoice $ normalizeET <$> xs
+--  where
+--    isEmpty = \case
+--      ETSequence [] -> True
+--      ETChoice   [] -> True
+--      _             -> False
+--    f = \case
+--      ETSequence (x:xs) -> Just (x, xs)
+--      _ -> Nothing
+--    recombine (Right xs) = normalizeET xs
+--    recombine (Left (ys, zs)) = ETSequence $ ETChoice (normalizeET <$> ys) : (normalizeET <$> zs)
 
--- formJSON :: Form a -> A.Value
--- formJSON = getJA . runAlt (JA . go)
---   where
---     go :: FormElem b -> A.Value
---     go (FE _ desc _ _) = A.String desc
+
+--firstChoice :: ElemTree -> [T.Text]
+--firstChoice = \case
+--  ETLeaf x       -> [x]
+--  ETSequence xs  -> firstChoice =<< xs
+--  ETChoice []    -> []
+--  ETChoice (x:_) -> firstChoice x
+
+--etString :: ElemTree -> T.Text
+--etString = \case
+--  ETLeaf x -> x
+--  ETSequence [] -> ""
+--  ETSequence xs -> T.concat ["(", T.intercalate " and " $ etString <$> xs, ")"]
+--  ETChoice [] -> ""
+--  ETChoice xs -> T.concat ["(", T.intercalate " or " $ etString <$> xs, ")"]
+
+--undistribute :: Eq c => (a -> Maybe (b, c)) -> [a] -> [Either ([b], c) a]
+--undistribute f = map recombine . groupBy g . map f'
+--    -- case traverse f xs of
+--    -- Just yszs -> map recombine $ groupBy ((==) `on` snd) yszs
+--  where
+--    f' x = case f x of
+--      Just y  -> Left y
+--      Nothing -> Right x
+--    g (Left (_,x)) (Left (_,y)) = x == y
+--    g _            _            = False
+--    recombine [Right x] = Right x
+--    recombine (Left (x,y) : xys) = Left (x : [ x' | Left (x', _) <- xys ], y)
+--    recombine _ = undefined
+--    -- recombine ((x,y):xys) = (x : map fst xys,y)
+--                      -- do
+--    -- (y,z):yszs <- traverse f xs
+--    -- guard $ all ((== z) . snd) yszs
+--    -- return (y : fmap fst yszs, z)
+
+--instance A.ToJSON ElemTree
+
+--data ElemTreeF a = ETF { getETF :: ElemTree }
+--  deriving (Functor, Show)
+
+--sequenceET :: ElemTree -> ElemTree -> ElemTree
+--sequenceET = \case
+--    x@(ETLeaf _) -> \case
+--      y@(ETLeaf _)    -> ETSequence [x, y]
+--      ETSequence ys   -> ETSequence $ x : ys
+--      ys@(ETChoice _) -> ETSequence [x, ys]
+--    ETSequence xs -> \case
+--      y@(ETLeaf _)    -> ETSequence $ xs ++ [y]
+--      ETSequence ys   -> ETSequence $ xs ++ ys
+--      ys@(ETChoice _) -> ETSequence $ xs ++ [ys]
+--    ETChoice xs -> \case
+--      y@(ETLeaf _)    -> ETSequence $ xs ++ [y]
+--      ETSequence ys   -> ETSequence $ ETChoice xs : ys
+--      ys@(ETChoice _) -> ETSequence [ETChoice xs, ys]
+
+--instance Applicative ElemTreeF where
+--    pure _ = ETF $ ETSequence []
+--    ETF x <*> ETF y = ETF $ sequenceET x y
+
+--choiceET :: ElemTree -> ElemTree -> ElemTree
+--choiceET = \case
+--    x@(ETLeaf _) -> \case
+--      y@(ETLeaf _)      -> ETChoice [x, y]
+--      ys@(ETSequence _) -> ETChoice [x, ys]
+--      ETChoice ys       -> ETChoice $ x : ys
+--    ETSequence xs -> \case
+--      y@(ETLeaf _)      -> ETChoice $ xs ++ [y]
+--      ys@(ETSequence _) -> ETChoice $ [ETSequence xs, ys]
+--      ETChoice ys       -> ETChoice $ ETSequence xs : ys
+--    ETChoice xs -> \case
+--      y@(ETLeaf _)      -> ETChoice $ xs ++ [y]
+--      ys@(ETSequence _) -> ETChoice $ xs ++ [ys]
+--      ETChoice ys       -> ETChoice $ xs ++ ys
+
+--instance Alternative ElemTreeF where
+--    empty = ETF $ ETChoice []
+--    ETF x <|> ETF y = ETF $ choiceET x y
+
+---- shoe :: ElemTree -> String
+---- printElemTree = \case
+
+---- sequenceET :: ElemTree -> ElemTree -> ElemTree
+---- sequenceET t1 t2 = ETSequence ()
+--    -- ETLeaf x -> \case
+--    --   ETLeaf y -> ETSequence (ETLeaf x NE.:| [ETLeaf y])
+
+---- dephantom :: ElemTree a -> ElemTree b
+---- dephantom = \case
+----     ETLeaf -> ETLeaf
+----     ETSequence xs -> ETSequence (fmap dephantom xs)
+----     ETChoice xs   -> ETChoice (fmap dephantom xs)
+
+---- instance Applicative ElemTree where
+----     pure _ = ETPure
+----     ETLeaf x <*> ETLeaf y      = ETSequence [ETLeaf x, ETLeaf y]
+----     ETLeaf x <*> ETSequence ys = ETSequence $ ETLeaf x : _ ys
+
+---- data ElemAlt a = EA { getEA :: Free [] T.Text }
+----     deriving Functor
+
+---- instance Applicative ElemAlt where
+----     pure _ = EA $ liftF []
+----     -- EA xs <*> EA ys = EA . liftF $ retract xs ++ retract ys
+----     EA xs <*> EA ys = case (xs, ys) of
+----       (FM.Pure x  , FM.Pure y  ) -> EA $ liftF [x,y]
+----       (FM.Pure x  , FM.Free ys') -> EA $ FM.Free (liftF [x] : ys')
+----       (FM.Free xs', FM.Free ys') -> EA $ FM.Free (xs' ++ ys')
+----       (FM.Free xs', FM.Pure y  ) -> EA $ FM.Free (xs' ++ [liftF [y]])
+
+---- instance Alternative ElemAlt where
+----     empty = EA $ liftF []
+----     -- EA xs <|> EA ys = EA . liftF $ retract xs ++ retract ys
+----     EA xs <|> EA ys = case (xs, ys) of
+----       (FM.Pure x  , FM.Pure y  ) -> EA $ FM.Free (fmap FM.Pure [x,y])
+----       -- (FM.Pure x  , FM.Free ys') -> EA $ FM.Free (liftF [x] : ys')
+----       -- (FM.Free xs', FM.Free ys') -> EA $ FM.Free (xs' ++ ys')
+----       -- (FM.Free xs', FM.Pure y  ) -> EA $ FM.Free (xs' ++ [liftF [y]])
+
+---- instance Alternative ElemAlt where
+----     empty = EA []
+----     EA xs <|> EA ys = EA (fmap (T.append "+ ") xs ++ fmap (T.append "- ") ys)
+
+--formElems :: Form a -> ElemTree
+--formElems = getETF . runAlt (ETF . go)
+--  where
+--    go :: FormElem b -> ElemTree
+--    go (FE _ desc _ _) = ETLeaf desc
+
+---- data JSONAlt a = JA { getJA :: A.Value }
+----     deriving Functor
+
+---- instance Applicative JSONAlt where
+----     pure _ = JA A.Null
+----     JA x <*> JA y =
+
+---- formJSON :: Form a -> A.Value
+---- formJSON = getJA . runAlt (JA . go)
+----   where
+----     go :: FormElem b -> A.Value
+----     go (FE _ desc _ _) = A.String desc
 
 
-    -- ECheck  :: Elem Bool
-          -- case x of
-          -- _
-      -- printf "%s: " desc
-      -- rp
-      -- _
+--    -- ECheck  :: Elem Bool
+--          -- case x of
+--          -- _
+--      -- printf "%s: " desc
+--      -- rp
+--      -- _
 
-      -- printf "%s: " desc
-      -- case
-      -- forM_ d $ \d ->
-      --   printf "(%s) " d
-      -- _
-    -- FE :: { feElem    :: Elem a
-    --       , feDescr   :: T.Text
-    --       , feDefault :: Maybe a
-    --       , feParse   :: a -> Either String (b, T.Text)
-    --       }
-    --    -> FormElem b
+--      -- printf "%s: " desc
+--      -- case
+--      -- forM_ d $ \d ->
+--      --   printf "(%s) " d
+--      -- _
+--    -- FE :: { feElem    :: Elem a
+--    --       , feDescr   :: T.Text
+--    --       , feDefault :: Maybe a
+--    --       , feParse   :: a -> Either String (b, T.Text)
+--    --       }
+--    --    -> FormElem b
 
---     EText   :: Elem T.Text
---     ESelect :: Sing n -> SV.Vector n T.Text -> Elem (Choice n)
---     ECheck  :: Elem Bool
+----     EText   :: Elem T.Text
+----     ESelect :: Sing n -> SV.Vector n T.Text -> Elem (Choice n)
+----     ECheck  :: Elem Bool
 
--- anyways looks like a HUGE hassle
--- just to get the right behavior
---
--- what i want is a free alternative that is *not* left distributing
+---- anyways looks like a HUGE hassle
+---- just to get the right behavior
+----
+---- what i want is a free alternative that is *not* left distributing
